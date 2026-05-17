@@ -10,6 +10,8 @@ import traceback
 from pathlib import Path
 
 if sys.platform == "win32":
+    from ctypes import wintypes
+
     import winreg
 
 from PySide6.QtCore import QEvent, QRect, QRectF, QSize, QThread, QTimer, Qt, QUrl, qInstallMessageHandler
@@ -108,6 +110,52 @@ from workers import (
 )
 
 import main as portal_core
+
+
+if sys.platform == "win32":
+    class WindowsMessage(ctypes.Structure):
+        _fields_ = (
+            ("hwnd", wintypes.HWND),
+            ("message", wintypes.UINT),
+            ("wParam", wintypes.WPARAM),
+            ("lParam", wintypes.LPARAM),
+            ("time", wintypes.DWORD),
+            ("pt", wintypes.POINT),
+        )
+
+
+_SHOW_EXISTING_INSTANCE_MESSAGE_ID = 0
+
+
+def get_show_existing_instance_message_id() -> int:
+    global _SHOW_EXISTING_INSTANCE_MESSAGE_ID
+    if sys.platform != "win32":
+        return 0
+    if not _SHOW_EXISTING_INSTANCE_MESSAGE_ID:
+        user32 = ctypes.windll.user32
+        user32.RegisterWindowMessageW.argtypes = (ctypes.c_wchar_p,)
+        user32.RegisterWindowMessageW.restype = wintypes.UINT
+        _SHOW_EXISTING_INSTANCE_MESSAGE_ID = int(
+            user32.RegisterWindowMessageW("CUMT.CampusLogin.ShowExistingWindow")
+        )
+    return _SHOW_EXISTING_INSTANCE_MESSAGE_ID
+
+
+def notify_existing_instance() -> None:
+    if sys.platform != "win32":
+        return
+    message_id = get_show_existing_instance_message_id()
+    if not message_id:
+        return
+    user32 = ctypes.windll.user32
+    user32.PostMessageW.argtypes = (
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    )
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.PostMessageW(wintypes.HWND(0xFFFF), message_id, 0, 0)
 
 
 
@@ -276,6 +324,14 @@ class CampusLoginWindow(QMainWindow):
         self._refresh_window_constraints()
 
     def nativeEvent(self, eventType, message):
+        if sys.platform == "win32":
+            try:
+                native_message = WindowsMessage.from_address(int(message))
+                if native_message.message == get_show_existing_instance_message_id():
+                    QTimer.singleShot(0, self._show_window)
+                    return True, 0
+            except Exception:
+                pass
         return super().nativeEvent(eventType, message)
 
     def _create_resize_grips(self) -> None:
@@ -844,13 +900,13 @@ class CampusLoginWindow(QMainWindow):
 
         self.open_config_dir_button = QPushButton("打开配置文件夹")
         self.open_config_dir_button.setObjectName("ghost")
-        self.open_config_dir_button.setFont(self._make_button_font(15))
+        self.open_config_dir_button.setFont(self._make_settings_action_font())
         self.open_config_dir_button.clicked.connect(self._open_user_data_dir)
         settings_actions.addWidget(self.open_config_dir_button)
 
         self.open_github_button = QPushButton("打开项目地址")
         self.open_github_button.setObjectName("ghost")
-        self.open_github_button.setFont(self._make_button_font(15))
+        self.open_github_button.setFont(self._make_settings_action_font())
         self.open_github_button.setIcon(QIcon(str((ICON_DIR / "github.svg").resolve())))
         self.open_github_button.setIconSize(QSize(18, 18))
         self.open_github_button.clicked.connect(self._open_project_github)
@@ -894,6 +950,9 @@ class CampusLoginWindow(QMainWindow):
 
     def _make_button_font(self, size: int | None = None) -> QFont:
         return self._make_typography_font("button", pixel_size=size)
+
+    def _make_settings_action_font(self) -> QFont:
+        return self._make_typography_font("button", pixel_size=15, weight=600)
 
     def _make_title_font(self, pixel_size: int = 30) -> QFont:
         return self._make_typography_font("window_title", pixel_size=pixel_size)
@@ -2002,13 +2061,20 @@ class CampusLoginWindow(QMainWindow):
 
     def _finish_logout(self, result: dict) -> None:
         self._set_logout_busy_state(False)
+        ok = bool(result.get("ok"))
         message = str(result.get("message", "") or "").strip()
         if self._looks_unreadable_message(message):
-            message = "注销完成。"
+            message = "已注销校园网登录。" if ok else "注销失败，未能确认已下线。"
         self._append_log(message)
         self._pause_auto_detection_and_login_for_session(
             "用户主动注销，已停止本次运行内的自动检测和自动登录。"
         )
+        if not ok:
+            self.last_result_label.setText(message)
+            self._show_windows_notification("校园网注销失败", message)
+            self._refresh_environment_status(force=True, suppress_change_notification=True)
+            return
+
         logout_notice = "已注销，在手动登录前不再执行自动登录。"
         self.last_result_label.setText(logout_notice)
         self._last_campus_authenticated_state = False
@@ -2304,31 +2370,36 @@ class CampusLoginWindow(QMainWindow):
 def main() -> int:
     single_instance_lock = acquire_single_instance_lock()
     if sys.platform == "win32" and single_instance_lock is None:
+        notify_existing_instance()
         return 0
 
-    install_exception_logging()
-    set_windows_app_user_model_id()
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
-    start_hidden = "--start-hidden" in sys.argv[1:]
-    from_startup = "--from-startup" in sys.argv[1:]
-    loaded_families = load_bundled_font_families()
-    font_family = pick_font_family(
-        loaded_families,
-        "MiSans VF",
-        "MiSans",
-        fallback=DEFAULT_APP_FONT_FAMILY,
-    )
-    app_font = QFont(font_family)
-    app_font.setPixelSize(int(TYPOGRAPHY["app"]["size"]))
-    app_font.setWeight(QFont.Weight(int(TYPOGRAPHY["app"]["weight"])))
-    app.setFont(app_font)
-    window = CampusLoginWindow(start_hidden=start_hidden, from_startup=from_startup)
-    if start_hidden:
-        window.start_hidden_startup_tasks()
-    else:
-        window.show()
-    return app.exec()
+    try:
+        install_exception_logging()
+        set_windows_app_user_model_id()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)
+        start_hidden = "--start-hidden" in sys.argv[1:]
+        from_startup = "--from-startup" in sys.argv[1:]
+        loaded_families = load_bundled_font_families()
+        font_family = pick_font_family(
+            loaded_families,
+            "MiSans VF",
+            "MiSans",
+            fallback=DEFAULT_APP_FONT_FAMILY,
+        )
+        app_font = QFont(font_family)
+        app_font.setPixelSize(int(TYPOGRAPHY["app"]["size"]))
+        app_font.setWeight(QFont.Weight(int(TYPOGRAPHY["app"]["weight"])))
+        app.setFont(app_font)
+        window = CampusLoginWindow(start_hidden=start_hidden, from_startup=from_startup)
+        if start_hidden:
+            window.start_hidden_startup_tasks()
+        else:
+            window.show()
+        return app.exec()
+    finally:
+        if sys.platform == "win32" and single_instance_lock:
+            ctypes.windll.kernel32.CloseHandle(single_instance_lock)
 
 
 if __name__ == "__main__":
