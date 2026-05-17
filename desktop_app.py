@@ -123,6 +123,25 @@ def set_windows_app_user_model_id() -> None:
         pass
 
 
+def acquire_single_instance_lock():
+    if sys.platform != "win32":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.GetLastError.restype = ctypes.c_uint32
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_bool
+
+    handle = kernel32.CreateMutexW(None, True, "Local\\CUMT.CampusLogin.SingleInstance")
+    already_exists = kernel32.GetLastError() == 183
+    if already_exists:
+        if handle:
+            kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
 def load_app_icon(fallback_provider) -> QIcon:
     icon_path = ACTIVE_APP_ICON_PATH
     if ACTIVE_APP_ICON_PATH.exists():
@@ -209,6 +228,7 @@ class CampusLoginWindow(QMainWindow):
         self._from_startup = from_startup or start_hidden
         self._last_auto_connect_at = 0.0
         self._auto_connect_paused_for_session = False
+        self._status_detection_paused_for_session = False
         self._current_login_is_manual = False
         self._startup_status_deadline = 0.0
         self._last_campus_connected_state: bool | None = None
@@ -812,7 +832,7 @@ class CampusLoginWindow(QMainWindow):
         self.auto_connect_check = QCheckBox("检测到校园网未登录时自动登录")
         self.auto_connect_check.setObjectName("settingsOptionCheck")
         layout.addWidget(self.auto_connect_check)
-        self.auto_connect_pause_label = QLabel("自动登录已临时暂停，手动登录成功后恢复。")
+        self.auto_connect_pause_label = QLabel("自动检测和自动登录已临时停止，手动登录成功后恢复。")
         self.auto_connect_pause_label.setObjectName("hint")
         self.auto_connect_pause_label.setWordWrap(True)
         self.auto_connect_pause_label.setVisible(False)
@@ -1090,6 +1110,11 @@ class CampusLoginWindow(QMainWindow):
         self.auto_connect_pause_label.setVisible(self._auto_connect_paused_for_session)
 
     def _apply_status_monitor_settings(self) -> None:
+        if self._status_detection_paused_for_session:
+            if self.status_timer is not None:
+                self.status_timer.stop()
+                self.status_timer = None
+            return
         if self.config["ui"].get("status_monitor_enabled", False):
             if self.startup_status_timer is not None:
                 return
@@ -1099,24 +1124,18 @@ class CampusLoginWindow(QMainWindow):
             self.status_timer.stop()
             self.status_timer = None
 
-    def _disable_status_monitor_for_access_window(self) -> None:
-        ui_config = self.config.setdefault("ui", {})
+    def _pause_auto_detection_and_login_for_session(self, log_message: str | None = None) -> None:
+        self._set_auto_connect_paused_for_session(True)
+        self._status_detection_paused_for_session = True
+        if self.startup_status_timer is not None:
+            self.startup_status_timer.stop()
+            self.startup_status_timer = None
         if self.status_timer is not None:
             self.status_timer.stop()
             self.status_timer = None
-        if not ui_config.get("status_monitor_enabled", False):
-            return
-
-        ui_config["status_monitor_enabled"] = False
-        self.monitor_check.blockSignals(True)
-        self.monitor_check.setChecked(False)
-        self.monitor_check.blockSignals(False)
         self._update_settings_ui_state()
-        try:
-            self._write_config()
-        except OSError as exc:
-            append_runtime_log(f"Failed to save monitor-disabled setting: {exc}")
-        self._append_log("当前时段不允许上网，已关闭持续检测连接状态。")
+        if log_message:
+            self._append_log(log_message)
 
     def _handle_access_window_rejection(self, message: str) -> None:
         notice = message or "当前时段不允许上网。"
@@ -1124,8 +1143,10 @@ class CampusLoginWindow(QMainWindow):
             notice = "当前时段不允许上网。"
         self._append_log(notice)
         self.last_result_label.setText(notice)
-        self._show_windows_notification("当前时段不允许上网", notice)
-        self._disable_status_monitor_for_access_window()
+        self._show_windows_notification("校园网登录受限", notice)
+        self._pause_auto_detection_and_login_for_session(
+            "当前时段不允许上网，已停止本次运行内的自动检测和自动登录。"
+        )
 
     def _looks_unreadable_message(self, message: str | None) -> bool:
         text = str(message or "").strip()
@@ -1165,16 +1186,12 @@ class CampusLoginWindow(QMainWindow):
         if reason not in stop_reasons:
             return False
 
-        self._set_auto_connect_paused_for_session(True)
-        if self.startup_status_timer is not None:
-            self._stop_startup_status_monitor(
-                final_text=None,
-                start_background_monitor=False,
-            )
-
         if reason == "outside_access_window":
             self._handle_access_window_rejection(message)
         else:
+            self._pause_auto_detection_and_login_for_session(
+                "已停止本次运行内的自动检测和自动登录。"
+            )
             self._append_log(message)
             self.last_result_label.setText(message)
             self._show_windows_notification("校园网登录失败", message)
@@ -1244,6 +1261,8 @@ class CampusLoginWindow(QMainWindow):
         self._update_form_action_buttons()
 
     def _start_status_monitor(self) -> None:
+        if self._status_detection_paused_for_session:
+            return
         interval_seconds = int(
             self.config.get("ui", {}).get(
                 "status_refresh_interval_seconds",
@@ -1258,6 +1277,8 @@ class CampusLoginWindow(QMainWindow):
         self.status_timer.start()
 
     def _start_startup_status_monitor(self) -> None:
+        if self._status_detection_paused_for_session:
+            return
         self._startup_status_deadline = (
             time.monotonic() + STARTUP_STATUS_MONITOR_DURATION_SECONDS
         )
@@ -1274,6 +1295,9 @@ class CampusLoginWindow(QMainWindow):
         self._run_startup_status_monitor_tick(first_tick=True)
 
     def _run_startup_status_monitor_tick(self, first_tick: bool = False) -> None:
+        if self._status_detection_paused_for_session:
+            self._stop_startup_status_monitor(final_text=None, start_background_monitor=False)
+            return
         if time.monotonic() >= self._startup_status_deadline:
             self._stop_startup_status_monitor()
             return
@@ -1299,7 +1323,11 @@ class CampusLoginWindow(QMainWindow):
         if final_text and self.last_result_label.text().startswith("正在检测校园网"):
             self.last_result_label.setText(final_text)
 
-        if start_background_monitor and self.config["ui"].get("status_monitor_enabled", False):
+        if (
+            start_background_monitor
+            and not self._status_detection_paused_for_session
+            and self.config["ui"].get("status_monitor_enabled", False)
+        ):
             self._start_status_monitor()
 
     def _set_status_badge(self, badge: QLabel, text: str, background: str) -> None:
@@ -1617,6 +1645,8 @@ class CampusLoginWindow(QMainWindow):
         return "连通性测试结果：" + "，".join(parts)
 
     def _maybe_auto_connect(self, status: dict) -> None:
+        if self._status_detection_paused_for_session:
+            return
         if self._auto_connect_paused_for_session:
             return
         ui_config = self.config.get("ui", {})
@@ -1976,15 +2006,16 @@ class CampusLoginWindow(QMainWindow):
         if self._looks_unreadable_message(message):
             message = "注销完成。"
         self._append_log(message)
-        self._refresh_environment_status(force=True, suppress_change_notification=True)
-        self._set_auto_connect_paused_for_session(True)
+        self._pause_auto_detection_and_login_for_session(
+            "用户主动注销，已停止本次运行内的自动检测和自动登录。"
+        )
         logout_notice = "已注销，在手动登录前不再执行自动登录。"
         self.last_result_label.setText(logout_notice)
         self._last_campus_authenticated_state = False
         self._set_tray_auth_status(False)
         self._show_windows_notification(
             "校园网已注销",
-            logout_notice,
+            "在手动登录前不再执行自动登录。",
         )
 
     def _finish_login(self, result: dict) -> None:
@@ -1996,22 +2027,28 @@ class CampusLoginWindow(QMainWindow):
         self._set_busy_state(False)
         ok = bool(result.get("ok"))
         if ok and self._current_login_is_manual:
+            self._status_detection_paused_for_session = False
             self._set_auto_connect_paused_for_session(False)
+            self._apply_status_monitor_settings()
         self._current_login_is_manual = False
         message = self._login_message_for_result(
             result,
             "请检查账号、密码、运营商或当前网络状态。",
         )
         self._append_log(message)
-        self._refresh_environment_status(force=True, suppress_change_notification=True)
         self.last_result_label.setText(message or ("登录成功" if ok else "登录失败"))
         self._last_campus_authenticated_state = ok
         self._set_tray_auth_status(ok)
         if ok:
-            self._show_windows_notification("校园网登录成功", message or "校园网已登录。")
+            self._refresh_environment_status(force=True, suppress_change_notification=True)
+            success_notice = message or "当前设备已通过校园网认证。"
+            if success_notice in {"登录成功", "校园网已登录。"}:
+                success_notice = "当前设备已通过校园网认证。"
+            self._show_windows_notification("校园网登录成功", success_notice)
         elif self._handle_non_retriable_login_failure(result):
             return
         else:
+            self._refresh_environment_status(force=True, suppress_change_notification=True)
             self._show_windows_notification(
                 "校园网登录失败",
                 message or "请检查账号、密码、运营商或当前网络状态。",
@@ -2265,6 +2302,10 @@ class CampusLoginWindow(QMainWindow):
 
 
 def main() -> int:
+    single_instance_lock = acquire_single_instance_lock()
+    if sys.platform == "win32" and single_instance_lock is None:
+        return 0
+
     install_exception_logging()
     set_windows_app_user_model_id()
     app = QApplication(sys.argv)
