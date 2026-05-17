@@ -204,6 +204,7 @@ class CampusLoginWindow(QMainWindow):
         self._settings_panel_visible = False
         self._loading_ui_settings = False
         self._settings_signals_connected = False
+        self._exit_waiting_threads_logged: set[str] = set()
         self._start_hidden = start_hidden
         self._from_startup = from_startup or start_hidden
         self._last_auto_connect_at = 0.0
@@ -827,9 +828,11 @@ class CampusLoginWindow(QMainWindow):
         self.open_config_dir_button.clicked.connect(self._open_user_data_dir)
         settings_actions.addWidget(self.open_config_dir_button)
 
-        self.open_github_button = QPushButton("打开 GitHub")
+        self.open_github_button = QPushButton("打开项目地址")
         self.open_github_button.setObjectName("ghost")
         self.open_github_button.setFont(self._make_button_font(15))
+        self.open_github_button.setIcon(QIcon(str((ICON_DIR / "github.svg").resolve())))
+        self.open_github_button.setIconSize(QSize(18, 18))
         self.open_github_button.clicked.connect(self._open_project_github)
         settings_actions.addWidget(self.open_github_button)
         layout.addLayout(settings_actions)
@@ -1533,11 +1536,9 @@ class CampusLoginWindow(QMainWindow):
     def _handle_status_thread_finished(
         self,
         thread: QThread | None = None,
-        worker: StatusWorker | None = None,
     ) -> None:
         if thread is None or self.status_thread is thread:
             self.status_thread = None
-        if worker is None or self.status_worker is worker:
             self.status_worker = None
         self._stop_refresh_animation()
         self.status_refresh_button.setEnabled(True)
@@ -1691,7 +1692,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread, worker=worker: self._handle_status_thread_finished(thread, worker)
+            lambda thread=thread: self._handle_status_thread_finished(thread)
         )
         thread.finished.connect(thread.deleteLater)
         self._start_refresh_animation(visual_feedback)
@@ -1702,11 +1703,9 @@ class CampusLoginWindow(QMainWindow):
     def _handle_connectivity_thread_finished(
         self,
         thread: QThread | None = None,
-        worker: ConnectivityWorker | None = None,
     ) -> None:
         if thread is None or self.connectivity_thread is thread:
             self.connectivity_thread = None
-        if worker is None or self.connectivity_worker is worker:
             self.connectivity_worker = None
         self.run_latency_button.setEnabled(not self._is_busy)
         self.run_latency_button.setText("开始测试")
@@ -1738,7 +1737,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread, worker=worker: self._handle_connectivity_thread_finished(thread, worker)
+            lambda thread=thread: self._handle_connectivity_thread_finished(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -1746,21 +1745,17 @@ class CampusLoginWindow(QMainWindow):
     def _handle_login_thread_finished(
         self,
         thread: QThread | None = None,
-        worker: LoginWorker | None = None,
     ) -> None:
         if thread is None or self.worker_thread is thread:
             self.worker_thread = None
-        if worker is None or self.worker is worker:
             self.worker = None
 
     def _handle_logout_thread_finished(
         self,
         thread: QThread | None = None,
-        worker: LogoutWorker | None = None,
     ) -> None:
         if thread is None or self.logout_thread is thread:
             self.logout_thread = None
-        if worker is None or self.logout_worker is worker:
             self.logout_worker = None
 
     def _apply_window_chrome(self) -> None:
@@ -1942,7 +1937,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread, worker=worker: self._handle_login_thread_finished(thread, worker)
+            lambda thread=thread: self._handle_login_thread_finished(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -1970,7 +1965,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread, worker=worker: self._handle_logout_thread_finished(thread, worker)
+            lambda thread=thread: self._handle_logout_thread_finished(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -2159,11 +2154,12 @@ class CampusLoginWindow(QMainWindow):
             return True
 
         thread.quit()
-        if thread.wait(timeout_ms):
-            return True
-
-        append_runtime_log(f"{name} thread is still running; delaying application exit")
-        return False
+        if thread.isRunning():
+            if name not in self._exit_waiting_threads_logged:
+                self._exit_waiting_threads_logged.add(name)
+                append_runtime_log(f"{name} thread is still running; delaying application exit")
+            return False
+        return True
 
     def _request_app_exit(self) -> None:
         self._allow_close = True
