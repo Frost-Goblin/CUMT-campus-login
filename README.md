@@ -82,6 +82,7 @@
 
 ## 运行说明
 
+https://github.com/Frost-Goblin/CUMT-campus-login/releases/ 
 下载zip后解压到想要的文件夹，运行：
 
 ```text
