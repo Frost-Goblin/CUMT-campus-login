@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local config and credentials
+config.json
+
+# Logs
+*.log
+desktop_app_runtime.log*
+desktop_app_fault.log
+campus-login.log
+
+# Build outputs
+build/
+dist/
+
+# Local environments
+.env
+.venv/
+venv/
+
+# Editor/system files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
