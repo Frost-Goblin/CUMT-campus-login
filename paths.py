@@ -33,7 +33,7 @@ ICON_DIR = RESOURCE_DIR / "assets" / "icons"
 APP_ICON_PATH = ICON_DIR / "app.png"
 APP_ICO_PATH = ICON_DIR / "app.ico"
 ACTIVE_APP_ICON_PATH = APP_ICON_PATH
-PROJECT_GITHUB_URL = ""
+PROJECT_GITHUB_URL = "https://github.com/Frost-Goblin/campus-login"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
