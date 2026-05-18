@@ -67,6 +67,8 @@ from constants import (
     NETWORK_ICON_GLYPHS,
     OPERATORS,
     SETTINGS_PANEL_WIDTH,
+    STARTUP_AUTO_LOGIN_MAX_ATTEMPTS,
+    STARTUP_AUTO_LOGIN_RETRY_INTERVAL_SECONDS,
     STARTUP_RUN_VALUE_NAME,
     STARTUP_STATUS_MONITOR_DURATION_SECONDS,
     STARTUP_STATUS_MONITOR_INTERVAL_SECONDS,
@@ -279,6 +281,9 @@ class CampusLoginWindow(QMainWindow):
         self._status_detection_paused_for_session = False
         self._current_login_is_manual = False
         self._startup_status_deadline = 0.0
+        self._startup_auto_login_attempts = 0
+        self._last_startup_auto_login_at = 0.0
+        self._startup_auto_login_exhausted = False
         self._last_campus_connected_state: bool | None = None
         self._last_campus_authenticated_state: bool | None = None
         self._suppress_next_status_change_notification = False
@@ -1337,11 +1342,21 @@ class CampusLoginWindow(QMainWindow):
 
     def _start_startup_status_monitor(self) -> None:
         if self._status_detection_paused_for_session:
+            append_runtime_log("Startup status monitor skipped: detection paused for this session")
             return
+        self._startup_auto_login_attempts = 0
+        self._last_startup_auto_login_at = 0.0
+        self._startup_auto_login_exhausted = False
         self._startup_status_deadline = (
             time.monotonic() + STARTUP_STATUS_MONITOR_DURATION_SECONDS
         )
         self.last_result_label.setText("正在检测校园网连接和登录状态。")
+        append_runtime_log(
+            "Startup status monitor started: "
+            f"duration={STARTUP_STATUS_MONITOR_DURATION_SECONDS}s, "
+            f"interval={STARTUP_STATUS_MONITOR_INTERVAL_SECONDS}s, "
+            f"auto_connect={self.config.get('ui', {}).get('auto_connect_enabled', False)}"
+        )
 
         if self.startup_status_timer is None:
             self.startup_status_timer = QTimer(self)
@@ -1355,12 +1370,18 @@ class CampusLoginWindow(QMainWindow):
 
     def _run_startup_status_monitor_tick(self, first_tick: bool = False) -> None:
         if self._status_detection_paused_for_session:
+            append_runtime_log("Startup status monitor stopped: detection paused for this session")
             self._stop_startup_status_monitor(final_text=None, start_background_monitor=False)
             return
+        if self._is_busy or (self.worker_thread and self.worker_thread.isRunning()):
+            append_runtime_log("Startup status monitor tick skipped: login/logout busy")
+            return
         if time.monotonic() >= self._startup_status_deadline:
+            append_runtime_log("Startup status monitor reached deadline")
             self._stop_startup_status_monitor()
             return
 
+        append_runtime_log(f"Startup status monitor tick: first={first_tick}")
         if first_tick:
             self._refresh_environment_status(
                 force=True,
@@ -1613,6 +1634,18 @@ class CampusLoginWindow(QMainWindow):
 
     def _handle_environment_status(self, status: dict) -> None:
         self._apply_environment_status(status)
+        if self.startup_status_timer is not None:
+            network = status.get("network", {})
+            append_runtime_log(
+                "Startup status result: "
+                f"connected={bool(status.get('campus_connected'))}, "
+                f"authenticated={bool(status.get('campus_authenticated'))}, "
+                f"type={network.get('network_type', '') or '-'}, "
+                f"ssid={network.get('ssid', '') or '-'}, "
+                f"ip={network.get('wlan_user_ip', '') or '-'}, "
+                f"portal_reachable={bool(status.get('portal_reachable'))}, "
+                f"error={status.get('error', '') or '-'}"
+            )
         if self.startup_status_timer is not None and status.get("campus_authenticated"):
             self._stop_startup_status_monitor(
                 final_text="已登录校园网，启动检测已停止。",
@@ -1704,44 +1737,88 @@ class CampusLoginWindow(QMainWindow):
         return "连通性测试结果：" + "，".join(parts)
 
     def _maybe_auto_connect(self, status: dict) -> None:
+        log_startup_skip = self.startup_status_timer is not None
         if self._status_detection_paused_for_session:
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: detection paused for this session")
             return
         if self._auto_connect_paused_for_session:
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: auto-login paused for this session")
             return
         ui_config = self.config.get("ui", {})
         if not ui_config.get("auto_connect_enabled", False):
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: auto-connect disabled")
             return
         if not status.get("campus_connected"):
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: campus network not connected")
             return
         if status.get("campus_authenticated"):
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: already authenticated")
             return
         if self._is_busy:
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: login/logout busy")
             return
         if self.worker_thread and self.worker_thread.isRunning():
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: login worker already running")
             return
         if self.connectivity_thread and self.connectivity_thread.isRunning():
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: connectivity test running")
             return
         if not self.username_edit.text().strip() or not self.password_edit.text():
+            if log_startup_skip:
+                append_runtime_log("Startup auto-login skipped: username or password is empty")
             return
 
-        interval_seconds = int(
-            ui_config.get(
-                "status_refresh_interval_seconds",
-                DEFAULT_STATUS_REFRESH_INTERVAL_SECONDS,
-            )
-        )
-        cooldown_seconds = max(20, interval_seconds * 2)
         now = time.monotonic()
-        if now - self._last_auto_connect_at < cooldown_seconds:
-            return
+        if log_startup_skip:
+            if self._startup_auto_login_exhausted:
+                append_runtime_log("Startup auto-login skipped: max attempts already reached")
+                return
+            if self._startup_auto_login_attempts >= STARTUP_AUTO_LOGIN_MAX_ATTEMPTS:
+                self._startup_auto_login_exhausted = True
+                append_runtime_log(
+                    "Startup auto-login exhausted max attempts; continuing status detection only"
+                )
+                return
+            if (
+                self._startup_auto_login_attempts > 0
+                and now - self._last_startup_auto_login_at < STARTUP_AUTO_LOGIN_RETRY_INTERVAL_SECONDS
+            ):
+                append_runtime_log("Startup auto-login skipped: retry interval not reached")
+                return
+
+        if not log_startup_skip:
+            interval_seconds = int(
+                ui_config.get(
+                    "status_refresh_interval_seconds",
+                    DEFAULT_STATUS_REFRESH_INTERVAL_SECONDS,
+                )
+            )
+            cooldown_seconds = max(20, interval_seconds * 2)
+            if (
+                self._last_auto_connect_at > 0
+                and now - self._last_auto_connect_at < cooldown_seconds
+            ):
+                return
+
+        if log_startup_skip:
+            self._startup_auto_login_attempts += 1
+            self._last_startup_auto_login_at = now
+            append_runtime_log(
+                "Startup auto-login attempt "
+                f"{self._startup_auto_login_attempts}/{STARTUP_AUTO_LOGIN_MAX_ATTEMPTS}"
+            )
 
         self._last_auto_connect_at = now
-        if self.startup_status_timer is not None:
-            self._stop_startup_status_monitor(
-                final_text=None,
-                start_background_monitor=False,
-            )
         self._append_log("检测到校园网未登录，开始自动登录。")
+        append_runtime_log("Startup auto-login started" if log_startup_skip else "Background auto-login started")
         self.last_result_label.setText("检测到校园网未登录，正在自动登录。")
         self._start_login(manual=False)
 
@@ -2085,11 +2162,6 @@ class CampusLoginWindow(QMainWindow):
         )
 
     def _finish_login(self, result: dict) -> None:
-        if self.startup_status_timer is not None:
-            self._stop_startup_status_monitor(
-                final_text=None,
-                start_background_monitor=False,
-            )
         self._set_busy_state(False)
         ok = bool(result.get("ok"))
         if ok and self._current_login_is_manual:
@@ -2106,6 +2178,10 @@ class CampusLoginWindow(QMainWindow):
         self._last_campus_authenticated_state = ok
         self._set_tray_auth_status(ok)
         if ok:
+            if self.startup_status_timer is not None:
+                self._stop_startup_status_monitor(
+                    final_text="已登录校园网，启动检测已停止。",
+                )
             self._refresh_environment_status(force=True, suppress_change_notification=True)
             success_notice = message or "当前设备已通过校园网认证。"
             if success_notice in {"登录成功", "校园网已登录。"}:
