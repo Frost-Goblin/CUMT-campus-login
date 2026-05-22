@@ -4,6 +4,7 @@ from paths import FONT_DIR
 
 APP_USER_MODEL_ID = "CUMT.CampusLogin"
 APP_DISPLAY_NAME = "CUMT 校园网登录器"
+APP_VERSION = "v0.1.0-beta"
 OPERATORS = [
     ("中国电信", "@telecom"),
     ("中国移动", "@cmcc"),
@@ -21,7 +22,7 @@ SETTINGS_PANEL_WIDTH = 304
 TRAILING_ICON_AREA_WIDTH = 42
 TRAILING_ICON_SIZE = 22
 WINDOW_MIN_WIDTH = 460
-WINDOW_MIN_HEIGHT = 680
+WINDOW_MIN_HEIGHT = 730
 DEFAULT_APP_FONT_FAMILY = "Microsoft YaHei UI"
 
 TYPOGRAPHY = {

@@ -339,7 +339,7 @@ def merge_context(base_context: dict, extra_context: dict) -> dict:
     return merged
 
 
-def run_command(command: list[str]) -> str:
+def run_command(command: list[str], timeout_seconds: int = 4) -> str:
     startupinfo = None
     creationflags = 0
     if sys.platform == "win32":
@@ -354,14 +354,18 @@ def run_command(command: list[str]) -> str:
         encoding="utf-8",
         errors="ignore",
         check=True,
+        timeout=timeout_seconds,
         startupinfo=startupinfo,
         creationflags=creationflags,
     )
     return result.stdout
 
 
-def run_powershell(script: str) -> str:
-    return run_command(["powershell", "-NoProfile", "-Command", script])
+def run_powershell(script: str, timeout_seconds: int = 4) -> str:
+    return run_command(
+        ["powershell", "-NoProfile", "-Command", script],
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def detect_active_wifi_info(target_ssids: str | list[str] | tuple[str, ...] | set[str] | None) -> dict:

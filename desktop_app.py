@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 from constants import (
     ALLOWED_CAMPUS_SSIDS,
     APP_DISPLAY_NAME,
+    APP_VERSION,
     APP_USER_MODEL_ID,
     DEFAULT_APP_FONT_FAMILY,
     DEFAULT_STATUS_REFRESH_INTERVAL_SECONDS,
@@ -296,6 +297,9 @@ class CampusLoginWindow(QMainWindow):
         self._ensure_ui_config_defaults()
         self._load_ui_settings()
         self._load_form_from_config()
+        if sys.platform == "win32":
+            self.setAttribute(Qt.WA_NativeWindow, True)
+            self.winId()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -439,6 +443,8 @@ class CampusLoginWindow(QMainWindow):
     def _finish_startup(self) -> None:
         append_runtime_log("Startup tasks begin")
         self._create_tray()
+        if sys.platform == "win32":
+            QTimer.singleShot(1500, self._sync_startup_registration)
         self._start_startup_status_monitor()
         if self._start_hidden and self.tray_icon and self.isVisible():
             QTimer.singleShot(0, self._minimize_to_tray)
@@ -918,6 +924,12 @@ class CampusLoginWindow(QMainWindow):
         settings_actions.addWidget(self.open_github_button)
         layout.addLayout(settings_actions)
 
+        version_label = QLabel(f"版本 {APP_VERSION}")
+        version_label.setObjectName("hint")
+        version_label.setAlignment(Qt.AlignCenter)
+        version_label.setFont(self._make_typography_font("hint", pixel_size=13))
+        layout.addWidget(version_label)
+
         layout.addStretch(1)
         return panel
 
@@ -1148,7 +1160,7 @@ class CampusLoginWindow(QMainWindow):
         ui_config["system_notifications_enabled"] = self.system_notifications_check.isChecked()
         self._update_settings_ui_state()
         try:
-            self._sync_startup_task()
+            self._sync_startup_registration()
             self._write_config()
             self._apply_status_monitor_settings()
         except OSError as exc:
@@ -1269,15 +1281,7 @@ class CampusLoginWindow(QMainWindow):
                 return str(pythonw)
         return str(executable)
 
-    def _sync_startup_task(self) -> None:
-        if sys.platform != "win32":
-            return
-        if self.config["ui"].get("startup_enabled", False):
-            self._install_startup_task()
-            return
-        self._remove_startup_task()
-
-    def _install_startup_task(self) -> None:
+    def _build_startup_command(self) -> str:
         startup_mode = self.config["ui"].get("startup_mode", "show")
         if getattr(sys, "frozen", False):
             command = f'"{sys.executable}" --from-startup'
@@ -1287,7 +1291,24 @@ class CampusLoginWindow(QMainWindow):
             command = f'"{pythonw_path}" "{script_path}" --from-startup'
         if startup_mode == "tray":
             command += " --start-hidden"
+        return command
 
+    def _remove_startup_run_value(self) -> None:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                try:
+                    winreg.DeleteValue(key, STARTUP_RUN_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            pass
+
+    def _write_startup_run_value(self, command: str) -> None:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -1296,17 +1317,20 @@ class CampusLoginWindow(QMainWindow):
         ) as key:
             winreg.SetValueEx(key, STARTUP_RUN_VALUE_NAME, 0, winreg.REG_SZ, command)
 
-    def _remove_startup_task(self) -> None:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            try:
-                winreg.DeleteValue(key, STARTUP_RUN_VALUE_NAME)
-            except FileNotFoundError:
-                pass
+    def _sync_startup_registration(self) -> None:
+        if sys.platform != "win32":
+            return
+        if self.config["ui"].get("startup_enabled", False):
+            self._install_startup_registration()
+            return
+        self._remove_startup_registration()
+
+    def _install_startup_registration(self) -> None:
+        command = self._build_startup_command()
+        self._write_startup_run_value(command)
+
+    def _remove_startup_registration(self) -> None:
+        self._remove_startup_run_value()
 
     def _load_form_from_config(self) -> None:
         login_cfg = self.config["login"]
