@@ -289,6 +289,7 @@ class CampusLoginWindow(QMainWindow):
         self._last_campus_authenticated_state: bool | None = None
         self._suppress_next_status_change_notification = False
         self._manual_status_refresh_pending = False
+        self._status_thread_started_at = 0.0
         self.app_icon = load_app_icon(self.style())
         self.setWindowIcon(self.app_icon)
 
@@ -1657,9 +1658,19 @@ class CampusLoginWindow(QMainWindow):
             self._update_latency_result_widgets(latency_tests)
 
     def _handle_environment_status(self, status: dict) -> None:
+        network = status.get("network", {})
+        append_runtime_log(
+            "Environment status result: "
+            f"connected={bool(status.get('campus_connected'))}, "
+            f"authenticated={bool(status.get('campus_authenticated'))}, "
+            f"type={network.get('network_type', '') or '-'}, "
+            f"ssid={network.get('ssid', '') or '-'}, "
+            f"ip={network.get('wlan_user_ip', '') or '-'}, "
+            f"portal_reachable={bool(status.get('portal_reachable'))}, "
+            f"error={status.get('error', '') or '-'}"
+        )
         self._apply_environment_status(status)
         if self.startup_status_timer is not None:
-            network = status.get("network", {})
             append_runtime_log(
                 "Startup status result: "
                 f"connected={bool(status.get('campus_connected'))}, "
@@ -1681,6 +1692,8 @@ class CampusLoginWindow(QMainWindow):
         self,
         thread: QThread | None = None,
     ) -> None:
+        elapsed = time.monotonic() - self._status_thread_started_at if self._status_thread_started_at else 0.0
+        append_runtime_log(f"Environment status thread finished: elapsed={elapsed:.2f}s")
         if thread is None or self.status_thread is thread:
             self.status_thread = None
             self.status_worker = None
@@ -1853,14 +1866,22 @@ class CampusLoginWindow(QMainWindow):
         suppress_change_notification: bool = False,
     ) -> None:
         if self._is_busy and not force:
+            append_runtime_log("Environment status refresh skipped: app is busy")
             return
         if self.status_thread and self.status_thread.isRunning():
+            elapsed = time.monotonic() - self._status_thread_started_at if self._status_thread_started_at else 0.0
             if visual_feedback:
                 self._start_refresh_spin()
                 self._manual_status_refresh_pending = True
                 self.last_result_label.setText("正在检测网络状态，请稍候。")
                 self._set_tray_checking_status()
-            return
+            append_runtime_log(f"Environment status refresh skipped: previous thread still running ({elapsed:.2f}s)")
+            if elapsed <= 6:
+                return
+            append_runtime_log("Environment status thread appears stuck; clearing stale reference")
+            self.status_thread = None
+            self.status_worker = None
+            self.status_refresh_button.setEnabled(True)
 
         if visual_feedback:
             self._manual_status_refresh_pending = True
@@ -1874,6 +1895,11 @@ class CampusLoginWindow(QMainWindow):
 
         thread = QThread(self)
         worker = StatusWorker(self.config, timeout_seconds=2)
+        self._status_thread_started_at = time.monotonic()
+        append_runtime_log(
+            "Environment status refresh started: "
+            f"force={force}, visual={visual_feedback}, targets={','.join(target_ssids)}"
+        )
         self.status_thread = thread
         self.status_worker = worker
         worker.moveToThread(thread)
