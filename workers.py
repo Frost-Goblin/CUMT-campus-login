@@ -108,6 +108,11 @@ class StatusWorker(QObject):
                 "campus_authenticated": False,
                 "portal_reachable": False,
                 "portal_url": "",
+                "virtual_network": {
+                    "active": False,
+                    "interface_name": "",
+                    "interface_description": "",
+                },
                 "error": str(exc),
             }
         self.finished.emit(status)
@@ -196,6 +201,11 @@ class ConnectivityWorker(QObject):
                     "campus_authenticated": False,
                     "portal_reachable": False,
                     "portal_url": "",
+                    "virtual_network": {
+                        "active": False,
+                        "interface_name": "",
+                        "interface_description": "",
+                    },
                     "latency_tests": [],
                     "error": str(exc),
                 }

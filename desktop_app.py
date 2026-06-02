@@ -306,6 +306,7 @@ class CampusLoginWindow(QMainWindow):
         self._last_campus_authenticated_state: bool | None = None
         self._suppress_next_status_change_notification = False
         self._manual_status_refresh_pending = False
+        self._latest_environment_status: dict | None = None
         self._status_thread_started_at = 0.0
         self._pending_manual_refresh_auto_connect = False
         self.app_icon = load_app_icon(self.style())
@@ -709,11 +710,6 @@ class CampusLoginWindow(QMainWindow):
         tools_title.setObjectName("sectionTitle")
         tools_title.setFont(self._make_section_title_font())
         tools_layout.addWidget(tools_title)
-
-        self.env_summary_label = QLabel("正在检测当前网络环境。")
-        self.env_summary_label.setObjectName("hint")
-        self.env_summary_label.setWordWrap(True)
-        tools_layout.addWidget(self.env_summary_label)
 
         tools_buttons = QHBoxLayout()
         tools_buttons.setSpacing(6)
@@ -1611,6 +1607,9 @@ class CampusLoginWindow(QMainWindow):
 
     def _apply_environment_status(self, status: dict) -> None:
         info = status.get("network", {})
+        virtual_network = status.get("virtual_network", {})
+        virtual_network_active = bool(virtual_network.get("active"))
+        portal_reachable = bool(status.get("portal_reachable"))
         target_ssids = list(ALLOWED_CAMPUS_SSIDS)
         campus_connected = bool(status.get("campus_connected"))
         campus_authenticated = bool(status.get("campus_authenticated"))
@@ -1648,36 +1647,13 @@ class CampusLoginWindow(QMainWindow):
             self._set_status_badge(self.auth_badge, "未登录", "#b7791f")
         self._set_tray_auth_status(campus_authenticated)
 
-        if campus_connected:
-            if network_type == "wifi":
-                ssid = current_ssid or "未知 SSID"
-                if campus_authenticated:
-                    self.env_summary_label.setText(f"已连接校园网 Wi-Fi {ssid}，并且已经登录。")
-                else:
-                    self.env_summary_label.setText(f"已连接校园网 Wi-Fi {ssid}，但当前尚未登录。")
-            elif network_type == "ethernet":
-                if campus_authenticated:
-                    self.env_summary_label.setText("已连接校园网有线网络，并且已经登录。")
-                else:
-                    self.env_summary_label.setText("已连接校园网有线网络，但当前尚未登录。")
-            else:
-                self.env_summary_label.setText("已检测到校园网环境。")
-        else:
-            if network_type == "wifi" and current_ssid:
-                self.env_summary_label.setText(
-                    f"当前连接的是 {current_ssid}。"
-                )
-            elif network_type == "ethernet":
-                self.env_summary_label.setText("已检测到有线网络，但尚未确认它属于校园网。")
-            else:
-                self.env_summary_label.setText("当前没有检测到可用于校园网登录的活动会话。")
-
         self.env_details.setText(
             f"Type: {network_type or '-'}\n"
             f"SSID: {info.get('ssid', '') or '-'}\n"
             f"IP: {info.get('wlan_user_ip', '') or '-'}\n"
             f"MAC: {info.get('wlan_user_mac', '') or '-'}\n"
             f"Interface: {info.get('interface_name', '') or '-'}\n"
+            f"VPN/Virtual: {virtual_network.get('interface_name', '') or '-'}\n"
             f"Portal URL: {status.get('portal_url', '') or '-'}"
         )
         latency_tests = status.get("latency_tests") or []
@@ -1688,6 +1664,7 @@ class CampusLoginWindow(QMainWindow):
         if self._pending_manual_refresh_auto_connect and source != "startup":
             source = "manual_refresh"
             self._pending_manual_refresh_auto_connect = False
+        self._latest_environment_status = status
         network = status.get("network", {})
         append_runtime_log(
             "Environment status result: "
@@ -1732,6 +1709,29 @@ class CampusLoginWindow(QMainWindow):
         self.status_refresh_button.setEnabled(True)
         if self._manual_status_refresh_pending:
             self._manual_status_refresh_pending = False
+            if self._latest_environment_status is not None:
+                self.last_result_label.setText(
+                    self._manual_refresh_result_text(self._latest_environment_status)
+                )
+
+    def _manual_refresh_result_text(self, status: dict) -> str:
+        info = status.get("network", {})
+        virtual_network = status.get("virtual_network", {})
+        network_type = info.get("network_type", "")
+        current_ssid = info.get("ssid", "")
+
+        if status.get("campus_authenticated"):
+            return "状态已更新：校园网已登录。"
+        if status.get("campus_connected"):
+            return "状态已更新：已连接校园网，但当前尚未登录。"
+        if virtual_network.get("active") and not status.get("portal_reachable"):
+            virtual_name = virtual_network.get("interface_name", "") or "VPN/虚拟网卡"
+            return f"状态已更新：检测到 {virtual_name} 活动，校园网门户不可达。"
+        if network_type == "wifi" and current_ssid:
+            return "状态已更新：校园网未连接。"
+        if network_type == "ethernet":
+            return "状态已更新：校园网未连接。"
+        return "状态已更新：校园网未连接。"
 
     def _start_refresh_animation(self, visual_feedback: bool = False) -> None:
         if visual_feedback:

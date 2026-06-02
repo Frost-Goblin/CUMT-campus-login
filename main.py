@@ -417,7 +417,6 @@ def detect_active_wifi_info(target_ssids: str | list[str] | tuple[str, ...] | se
 
     current_name = ""
     current_ssid = ""
-    current_mac = ""
     current_state = ""
 
     for raw_line in netsh_output.splitlines():
@@ -432,8 +431,6 @@ def detect_active_wifi_info(target_ssids: str | list[str] | tuple[str, ...] | se
             current_state = value.lower()
         elif lowered_key == "ssid" and "bssid" not in lowered_key:
             current_ssid = value
-        elif lowered_key == "physical address":
-            current_mac = normalize_mac(value)
 
     if "connected" not in current_state:
         return detected
@@ -442,28 +439,26 @@ def detect_active_wifi_info(target_ssids: str | list[str] | tuple[str, ...] | se
 
     detected["interface_name"] = current_name
     detected["ssid"] = current_ssid
-    detected["wlan_user_mac"] = current_mac
     detected["network_type"] = "wifi"
 
     try:
-        ipconfig_output = run_command(["ipconfig"])
+        escaped_name = current_name.replace("'", "''")
+        ps_output = run_powershell(
+            "@("
+            f"$wifi = Get-NetAdapter -Name '{escaped_name}' -ErrorAction SilentlyContinue;"
+            "if ($null -ne $wifi) {"
+            "$ip = (Get-NetIPAddress -InterfaceIndex $wifi.ifIndex -AddressFamily IPv4 | "
+            "Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1 -ExpandProperty IPAddress);"
+            "[PSCustomObject]@{ MAC=($wifi.MacAddress -replace '-', '').ToLower(); IP=$ip } | ConvertTo-Json -Compress"
+            "}"
+            ")"
+        ).strip()
+        if ps_output:
+            wifi = json.loads(ps_output)
+            detected["wlan_user_mac"] = normalize_mac(wifi.get("MAC", "") or "")
+            detected["wlan_user_ip"] = wifi.get("IP", "") or ""
     except Exception:
         return detected
-
-    current_section = ""
-    for raw_line in ipconfig_output.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if raw_line.endswith(":"):
-            current_section = raw_line.strip().rstrip(":")
-            continue
-        if current_name and current_name not in current_section:
-            continue
-        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
-        if match and ("IPv4" in line or "IPv4 地址" in line):
-            detected["wlan_user_ip"] = match.group(1)
-            break
 
     return detected
 
@@ -500,6 +495,37 @@ def detect_active_wired_info() -> dict:
         detected["wlan_user_mac"] = normalize_mac(adapter.get("MAC", "") or "")
         detected["wlan_user_ip"] = adapter.get("IP", "") or ""
         detected["network_type"] = "ethernet"
+        return detected
+    except Exception:
+        return detected
+
+
+def detect_active_virtual_network_info() -> dict:
+    detected = {
+        "active": False,
+        "interface_name": "",
+        "interface_description": "",
+    }
+
+    try:
+        ps_output = run_powershell(
+            "@("
+            "$adapter = Get-NetAdapter | Where-Object { "
+            "$_.Status -eq 'Up' -and "
+            "$_.InterfaceDescription -match 'VPN|TAP|TUN|WireGuard|OpenVPN|Clash|Tailscale|ZeroTier' "
+            "} | Select-Object -First 1;"
+            "if ($null -ne $adapter) {"
+            "[PSCustomObject]@{ Name=$adapter.Name; Description=$adapter.InterfaceDescription } | ConvertTo-Json -Compress"
+            "}"
+            ")"
+        ).strip()
+        if not ps_output:
+            return detected
+
+        adapter = json.loads(ps_output)
+        detected["active"] = True
+        detected["interface_name"] = adapter.get("Name", "") or ""
+        detected["interface_description"] = adapter.get("Description", "") or ""
         return detected
     except Exception:
         return detected
@@ -623,6 +649,7 @@ def get_campus_status(
     request_cfg = config["request"]
     target_ssids = get_portal_target_ssids(portal_cfg)
     active_network = detect_active_network_info(target_ssids)
+    virtual_network = detect_active_virtual_network_info()
     network_type = active_network.get("network_type", "")
     wifi_matches_target = network_type == "wifi" and (
         ssid_matches_targets(active_network.get("ssid", ""), target_ssids)
@@ -652,6 +679,7 @@ def get_campus_status(
         "campus_authenticated": campus_connected and authenticated,
         "portal_reachable": portal_reachable,
         "portal_url": final_url,
+        "virtual_network": virtual_network,
     }
 
 
