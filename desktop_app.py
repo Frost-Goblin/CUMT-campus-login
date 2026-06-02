@@ -290,6 +290,7 @@ class CampusLoginWindow(QMainWindow):
         self._suppress_next_status_change_notification = False
         self._manual_status_refresh_pending = False
         self._status_thread_started_at = 0.0
+        self._pending_manual_refresh_auto_connect = False
         self.app_icon = load_app_icon(self.style())
         self.setWindowIcon(self.app_icon)
 
@@ -581,7 +582,11 @@ class CampusLoginWindow(QMainWindow):
         self.status_refresh_button.setAutoDefault(False)
         self.status_refresh_button.setDefault(False)
         self.status_refresh_button.clicked.connect(
-            lambda: self._refresh_environment_status(force=True, visual_feedback=True)
+            lambda: self._refresh_environment_status(
+                force=True,
+                visual_feedback=True,
+                source="manual_refresh",
+            )
         )
         header_layout.addWidget(self.status_refresh_button)
 
@@ -843,6 +848,7 @@ class CampusLoginWindow(QMainWindow):
             line.setStyleSheet("background: #ffffff; border: none; border-top: 1px solid #eef2f8;")
             layout.addWidget(line)
 
+        add_separator()
         close_label = QLabel("关闭后")
         close_label.setObjectName("settingsOptionLabel")
         layout.addWidget(close_label)
@@ -1361,7 +1367,9 @@ class CampusLoginWindow(QMainWindow):
         interval_ms = max(1, interval_seconds) * 1000
         if self.status_timer is None:
             self.status_timer = QTimer(self)
-            self.status_timer.timeout.connect(self._refresh_environment_status)
+            self.status_timer.timeout.connect(
+                lambda: self._refresh_environment_status(source="background")
+            )
         self.status_timer.setInterval(interval_ms)
         self.status_timer.start()
 
@@ -1411,10 +1419,11 @@ class CampusLoginWindow(QMainWindow):
             self._refresh_environment_status(
                 force=True,
                 suppress_change_notification=True,
+                source="startup",
             )
             return
 
-        self._refresh_environment_status(force=True)
+        self._refresh_environment_status(force=True, source="startup")
 
     def _stop_startup_status_monitor(
         self,
@@ -1657,10 +1666,14 @@ class CampusLoginWindow(QMainWindow):
         if "latency_tests" in status:
             self._update_latency_result_widgets(latency_tests)
 
-    def _handle_environment_status(self, status: dict) -> None:
+    def _handle_environment_status(self, status: dict, source: str = "background") -> None:
+        if self._pending_manual_refresh_auto_connect and source != "startup":
+            source = "manual_refresh"
+            self._pending_manual_refresh_auto_connect = False
         network = status.get("network", {})
         append_runtime_log(
             "Environment status result: "
+            f"source={source}, "
             f"connected={bool(status.get('campus_connected'))}, "
             f"authenticated={bool(status.get('campus_authenticated'))}, "
             f"type={network.get('network_type', '') or '-'}, "
@@ -1686,7 +1699,7 @@ class CampusLoginWindow(QMainWindow):
                 final_text="已登录校园网，启动检测已停止。",
             )
             return
-        self._maybe_auto_connect(status)
+        self._maybe_auto_connect(status, source=source)
 
     def _handle_status_thread_finished(
         self,
@@ -1773,48 +1786,53 @@ class CampusLoginWindow(QMainWindow):
                 parts.append(f"{item.get('name', '-')} 不可达")
         return "连通性测试结果：" + "，".join(parts)
 
-    def _maybe_auto_connect(self, status: dict) -> None:
-        log_startup_skip = self.startup_status_timer is not None
+    def _maybe_auto_connect(self, status: dict, source: str = "background") -> None:
+        is_startup = source == "startup" or self.startup_status_timer is not None
+        is_manual_refresh = source == "manual_refresh"
+        is_internal = source == "internal"
+        log_skip = source in {"startup", "manual_refresh"}
         if self._status_detection_paused_for_session:
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: detection paused for this session")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: detection paused for this session")
             return
         if self._auto_connect_paused_for_session:
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: auto-login paused for this session")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: auto-login paused for this session")
+            return
+        if is_internal:
             return
         ui_config = self.config.get("ui", {})
         if not ui_config.get("auto_connect_enabled", False):
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: auto-connect disabled")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: auto-connect disabled")
             return
         if not status.get("campus_connected"):
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: campus network not connected")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: campus network not connected")
             return
         if status.get("campus_authenticated"):
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: already authenticated")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: already authenticated")
             return
         if self._is_busy:
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: login/logout busy")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: login/logout busy")
             return
         if self.worker_thread and self.worker_thread.isRunning():
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: login worker already running")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: login worker already running")
             return
         if self.connectivity_thread and self.connectivity_thread.isRunning():
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: connectivity test running")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: connectivity test running")
             return
         if not self.username_edit.text().strip() or not self.password_edit.text():
-            if log_startup_skip:
-                append_runtime_log("Startup auto-login skipped: username or password is empty")
+            if log_skip:
+                append_runtime_log(f"{source} auto-login skipped: username or password is empty")
             return
 
         now = time.monotonic()
-        if log_startup_skip:
+        if is_startup:
             if self._startup_auto_login_exhausted:
                 append_runtime_log("Startup auto-login skipped: max attempts already reached")
                 return
@@ -1831,7 +1849,7 @@ class CampusLoginWindow(QMainWindow):
                 append_runtime_log("Startup auto-login skipped: retry interval not reached")
                 return
 
-        if not log_startup_skip:
+        if not is_startup and not is_manual_refresh:
             interval_seconds = int(
                 ui_config.get(
                     "status_refresh_interval_seconds",
@@ -1843,9 +1861,10 @@ class CampusLoginWindow(QMainWindow):
                 self._last_auto_connect_at > 0
                 and now - self._last_auto_connect_at < cooldown_seconds
             ):
+                append_runtime_log("Background auto-login skipped: cooldown not reached")
                 return
 
-        if log_startup_skip:
+        if is_startup:
             self._startup_auto_login_attempts += 1
             self._last_startup_auto_login_at = now
             append_runtime_log(
@@ -1855,7 +1874,12 @@ class CampusLoginWindow(QMainWindow):
 
         self._last_auto_connect_at = now
         self._append_log("检测到校园网未登录，开始自动登录。")
-        append_runtime_log("Startup auto-login started" if log_startup_skip else "Background auto-login started")
+        if is_startup:
+            append_runtime_log("Startup auto-login started")
+        elif is_manual_refresh:
+            append_runtime_log("Manual refresh auto-login started")
+        else:
+            append_runtime_log("Background auto-login started")
         self.last_result_label.setText("检测到校园网未登录，正在自动登录。")
         self._start_login(manual=False)
 
@@ -1864,12 +1888,15 @@ class CampusLoginWindow(QMainWindow):
         force: bool = False,
         visual_feedback: bool = False,
         suppress_change_notification: bool = False,
+        source: str = "background",
     ) -> None:
         if self._is_busy and not force:
             append_runtime_log("Environment status refresh skipped: app is busy")
             return
         if self.status_thread and self.status_thread.isRunning():
             elapsed = time.monotonic() - self._status_thread_started_at if self._status_thread_started_at else 0.0
+            if source == "manual_refresh":
+                self._pending_manual_refresh_auto_connect = True
             if visual_feedback:
                 self._start_refresh_spin()
                 self._manual_status_refresh_pending = True
@@ -1898,13 +1925,15 @@ class CampusLoginWindow(QMainWindow):
         self._status_thread_started_at = time.monotonic()
         append_runtime_log(
             "Environment status refresh started: "
-            f"force={force}, visual={visual_feedback}, targets={','.join(target_ssids)}"
+            f"source={source}, force={force}, visual={visual_feedback}, targets={','.join(target_ssids)}"
         )
         self.status_thread = thread
         self.status_worker = worker
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._handle_environment_status)
+        worker.finished.connect(
+            lambda status, source=source: self._handle_environment_status(status, source=source)
+        )
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
@@ -2199,7 +2228,11 @@ class CampusLoginWindow(QMainWindow):
         if not ok:
             self.last_result_label.setText(message)
             self._show_windows_notification("校园网注销失败", message)
-            self._refresh_environment_status(force=True, suppress_change_notification=True)
+            self._refresh_environment_status(
+                force=True,
+                suppress_change_notification=True,
+                source="internal",
+            )
             return
 
         logout_notice = "已注销，在手动登录前不再执行自动登录。"
@@ -2232,7 +2265,11 @@ class CampusLoginWindow(QMainWindow):
                 self._stop_startup_status_monitor(
                     final_text="已登录校园网，启动检测已停止。",
                 )
-            self._refresh_environment_status(force=True, suppress_change_notification=True)
+            self._refresh_environment_status(
+                force=True,
+                suppress_change_notification=True,
+                source="internal",
+            )
             success_notice = message or "当前设备已通过校园网认证。"
             if success_notice in {"登录成功", "校园网已登录。"}:
                 success_notice = "当前设备已通过校园网认证。"
@@ -2240,7 +2277,11 @@ class CampusLoginWindow(QMainWindow):
         elif self._handle_non_retriable_login_failure(result):
             return
         else:
-            self._refresh_environment_status(force=True, suppress_change_notification=True)
+            self._refresh_environment_status(
+                force=True,
+                suppress_change_notification=True,
+                source="internal",
+            )
             self._show_windows_notification(
                 "校园网登录失败",
                 message or "请检查账号、密码、运营商或当前网络状态。",
@@ -2330,7 +2371,11 @@ class CampusLoginWindow(QMainWindow):
 
         self.tray_refresh_action = QAction("刷新状态", self)
         self.tray_refresh_action.triggered.connect(
-            lambda: self._refresh_environment_status(force=True, visual_feedback=True)
+            lambda: self._refresh_environment_status(
+                force=True,
+                visual_feedback=True,
+                source="manual_refresh",
+            )
         )
         menu.addAction(self.tray_refresh_action)
 
