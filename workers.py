@@ -28,8 +28,7 @@ class LoginWorker(QObject):
         def emit_log(message: str) -> None:
             self.log.emit(message)
 
-        original_writer = portal_core.write_log
-        portal_core.write_log = emit_log
+        log_token = portal_core.set_thread_log_writer(emit_log)
         try:
             context, _, final_url = portal_core.fetch_portal_context(opener, self.config)
             self.log.emit(
@@ -49,7 +48,7 @@ class LoginWorker(QObject):
                 }
             )
         finally:
-            portal_core.write_log = original_writer
+            portal_core.reset_thread_log_writer(log_token)
 
 
 class LogoutWorker(QObject):
@@ -68,8 +67,7 @@ class LogoutWorker(QObject):
         def emit_log(message: str) -> None:
             self.log.emit(message)
 
-        original_writer = portal_core.write_log
-        portal_core.write_log = emit_log
+        log_token = portal_core.set_thread_log_writer(emit_log)
         try:
             self.finished.emit(portal_core.perform_logout_with_result(opener, self.config))
         except Exception as exc:
@@ -80,7 +78,7 @@ class LogoutWorker(QObject):
                 }
             )
         finally:
-            portal_core.write_log = original_writer
+            portal_core.reset_thread_log_writer(log_token)
 
 
 class StatusWorker(QObject):
@@ -124,8 +122,7 @@ class ConnectivityWorker(QObject):
         self.timeout_seconds = timeout_seconds
 
     def run(self) -> None:
-        original_writer = portal_core.write_log
-        portal_core.write_log = lambda _message: None
+        log_token = portal_core.set_thread_log_writer(lambda _message: None)
         try:
             result = portal_core.get_campus_status(
                 self.config,
@@ -204,4 +201,4 @@ class ConnectivityWorker(QObject):
                 }
             )
         finally:
-            portal_core.write_log = original_writer
+            portal_core.reset_thread_log_writer(log_token)

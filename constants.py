@@ -4,7 +4,7 @@ from paths import FONT_DIR
 
 APP_USER_MODEL_ID = "CUMT.CampusLogin"
 APP_DISPLAY_NAME = "CUMT 校园网登录器"
-APP_VERSION = "v0.1.0-beta"
+APP_VERSION = "v1.0.0"
 OPERATORS = [
     ("中国电信", "@telecom"),
     ("中国移动", "@cmcc"),

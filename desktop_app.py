@@ -14,7 +14,18 @@ if sys.platform == "win32":
 
     import winreg
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QSize, QThread, QTimer, Qt, QUrl, qInstallMessageHandler
+from PySide6.QtCore import (
+    QEvent,
+    QRect,
+    QRectF,
+    QSize,
+    QThread,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+    qInstallMessageHandler,
+)
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -229,6 +240,12 @@ def install_exception_logging() -> None:
 
 
 class CampusLoginWindow(QMainWindow):
+    status_result_ready = Signal(dict, str)
+    status_thread_done = Signal(object)
+    connectivity_thread_done = Signal(object)
+    login_thread_done = Signal(object)
+    logout_thread_done = Signal(object)
+
     def __init__(self, start_hidden: bool = False, from_startup: bool = False) -> None:
         super().__init__()
         self.setWindowTitle(APP_DISPLAY_NAME)
@@ -293,6 +310,11 @@ class CampusLoginWindow(QMainWindow):
         self._pending_manual_refresh_auto_connect = False
         self.app_icon = load_app_icon(self.style())
         self.setWindowIcon(self.app_icon)
+        self.status_result_ready.connect(self._handle_environment_status)
+        self.status_thread_done.connect(self._handle_status_thread_finished)
+        self.connectivity_thread_done.connect(self._handle_connectivity_thread_finished)
+        self.login_thread_done.connect(self._handle_login_thread_finished)
+        self.logout_thread_done.connect(self._handle_logout_thread_finished)
 
         self._build_ui()
         self._create_resize_grips()
@@ -1068,10 +1090,7 @@ class CampusLoginWindow(QMainWindow):
 
     def _ensure_ui_config_defaults(self) -> None:
         ui_config = self.config.setdefault("ui", {})
-        legacy_close_behavior = ui_config.get("close_behavior", "tray")
-        if legacy_close_behavior == "ask":
-            legacy_close_behavior = "tray"
-        ui_config["close_behavior"] = legacy_close_behavior
+        ui_config.setdefault("close_behavior", "tray")
         ui_config.setdefault("startup_enabled", False)
         ui_config.setdefault("startup_mode", "show")
         ui_config.setdefault("status_monitor_enabled", False)
@@ -1345,7 +1364,6 @@ class CampusLoginWindow(QMainWindow):
         self.username_edit.setText(login_cfg.get("username", ""))
         self.password_edit.setText(login_cfg.get("password", ""))
         self.config["portal"]["target_ssids"] = list(ALLOWED_CAMPUS_SSIDS)
-        self.config["portal"]["target_ssid"] = ALLOWED_CAMPUS_SSIDS[0]
 
         suffix = login_cfg.get("account_suffix", "")
         combo_index = next(
@@ -1714,7 +1732,6 @@ class CampusLoginWindow(QMainWindow):
         self.status_refresh_button.setEnabled(True)
         if self._manual_status_refresh_pending:
             self._manual_status_refresh_pending = False
-            self.last_result_label.setText("状态已更新。")
 
     def _start_refresh_animation(self, visual_feedback: bool = False) -> None:
         if visual_feedback:
@@ -1787,7 +1804,7 @@ class CampusLoginWindow(QMainWindow):
         return "连通性测试结果：" + "，".join(parts)
 
     def _maybe_auto_connect(self, status: dict, source: str = "background") -> None:
-        is_startup = source == "startup" or self.startup_status_timer is not None
+        is_startup = source == "startup"
         is_manual_refresh = source == "manual_refresh"
         is_internal = source == "internal"
         log_skip = source in {"startup", "manual_refresh"}
@@ -1918,7 +1935,6 @@ class CampusLoginWindow(QMainWindow):
 
         target_ssids = list(ALLOWED_CAMPUS_SSIDS)
         self.config["portal"]["target_ssids"] = target_ssids
-        self.config["portal"]["target_ssid"] = target_ssids[0]
 
         thread = QThread(self)
         worker = StatusWorker(self.config, timeout_seconds=2)
@@ -1932,12 +1948,12 @@ class CampusLoginWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(
-            lambda status, source=source: self._handle_environment_status(status, source=source)
+            lambda status, source=source: self.status_result_ready.emit(status, source)
         )
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread: self._handle_status_thread_finished(thread)
+            lambda thread=thread: self.status_thread_done.emit(thread)
         )
         thread.finished.connect(thread.deleteLater)
         self._start_refresh_animation(visual_feedback)
@@ -1966,7 +1982,6 @@ class CampusLoginWindow(QMainWindow):
 
         target_ssids = list(ALLOWED_CAMPUS_SSIDS)
         self.config["portal"]["target_ssids"] = target_ssids
-        self.config["portal"]["target_ssid"] = target_ssids[0]
 
         self._show_tools_page("latency")
         self.run_latency_button.setEnabled(False)
@@ -1982,7 +1997,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread: self._handle_connectivity_thread_finished(thread)
+            lambda thread=thread: self.connectivity_thread_done.emit(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -2091,9 +2106,7 @@ class CampusLoginWindow(QMainWindow):
         self.config["login"]["username"] = self.username_edit.text().strip()
         self.config["login"]["password"] = self.password_edit.text()
         self.config["login"]["account_suffix"] = self.operator_combo.currentData() or ""
-        self.config["login"]["account_prefix"] = ""
         self.config["portal"]["target_ssids"] = list(ALLOWED_CAMPUS_SSIDS)
-        self.config["portal"]["target_ssid"] = ALLOWED_CAMPUS_SSIDS[0]
 
         self._write_config()
         self._append_log("配置已保存。")
@@ -2101,8 +2114,97 @@ class CampusLoginWindow(QMainWindow):
         return True
 
     def _write_config(self) -> None:
+        self._normalize_config_for_save()
         with CONFIG_PATH.open("w", encoding="utf-8") as f:
             json.dump(self.config, f, ensure_ascii=False, indent=2)
+
+    def _normalize_config_for_save(self) -> None:
+        defaults = portal_core.get_default_config()
+        self.config = {
+            "request": {
+                "timeout_seconds": self.config.get("request", {}).get(
+                    "timeout_seconds",
+                    defaults["request"]["timeout_seconds"],
+                ),
+                "skip_tls_verify": self.config.get("request", {}).get(
+                    "skip_tls_verify",
+                    defaults["request"]["skip_tls_verify"],
+                ),
+            },
+            "portal": {
+                "target_ssids": list(ALLOWED_CAMPUS_SSIDS),
+                "landing_url": self.config.get("portal", {}).get(
+                    "landing_url",
+                    defaults["portal"]["landing_url"],
+                ),
+                "login_base_url": self.config.get("portal", {}).get(
+                    "login_base_url",
+                    defaults["portal"]["login_base_url"],
+                ),
+                "logout_path": self.config.get("portal", {}).get(
+                    "logout_path",
+                    defaults["portal"]["logout_path"],
+                ),
+                "js_version": self.config.get("portal", {}).get(
+                    "js_version",
+                    defaults["portal"]["js_version"],
+                ),
+                "default_wlan_ac_name": self.config.get("portal", {}).get(
+                    "default_wlan_ac_name",
+                    defaults["portal"]["default_wlan_ac_name"],
+                ),
+                "default_wlan_ac_ip": self.config.get("portal", {}).get(
+                    "default_wlan_ac_ip",
+                    defaults["portal"]["default_wlan_ac_ip"],
+                ),
+            },
+            "login": {
+                "username": self.config.get("login", {}).get("username", ""),
+                "password": self.config.get("login", {}).get("password", ""),
+                "account_suffix": self.config.get("login", {}).get(
+                    "account_suffix",
+                    defaults["login"]["account_suffix"],
+                ),
+                "login_method": self.config.get("login", {}).get(
+                    "login_method",
+                    defaults["login"]["login_method"],
+                ),
+            },
+            "ui": {
+                "close_behavior": self.config.get("ui", {}).get(
+                    "close_behavior",
+                    defaults["ui"]["close_behavior"],
+                ),
+                "status_monitor_enabled": self.config.get("ui", {}).get(
+                    "status_monitor_enabled",
+                    defaults["ui"]["status_monitor_enabled"],
+                ),
+                "startup_enabled": self.config.get("ui", {}).get(
+                    "startup_enabled",
+                    defaults["ui"]["startup_enabled"],
+                ),
+                "startup_mode": self.config.get("ui", {}).get(
+                    "startup_mode",
+                    defaults["ui"]["startup_mode"],
+                ),
+                "status_refresh_interval_seconds": self.config.get("ui", {}).get(
+                    "status_refresh_interval_seconds",
+                    defaults["ui"]["status_refresh_interval_seconds"],
+                ),
+                "auto_connect_enabled": self.config.get("ui", {}).get(
+                    "auto_connect_enabled",
+                    defaults["ui"]["auto_connect_enabled"],
+                ),
+                "system_notifications_enabled": self.config.get("ui", {}).get(
+                    "system_notifications_enabled",
+                    defaults["ui"]["system_notifications_enabled"],
+                ),
+                "tray_minimize_notice_shown": self.config.get("ui", {}).get(
+                    "tray_minimize_notice_shown",
+                    defaults["ui"]["tray_minimize_notice_shown"],
+                ),
+            },
+        }
 
     def _set_busy_state(self, busy: bool) -> None:
         self._is_busy = busy
@@ -2182,7 +2284,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread: self._handle_login_thread_finished(thread)
+            lambda thread=thread: self.login_thread_done.emit(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -2210,7 +2312,7 @@ class CampusLoginWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
         thread.finished.connect(
-            lambda thread=thread: self._handle_logout_thread_finished(thread)
+            lambda thread=thread: self.logout_thread_done.emit(thread)
         )
         thread.finished.connect(thread.deleteLater)
         thread.start()
@@ -2463,7 +2565,7 @@ class CampusLoginWindow(QMainWindow):
             app.quit()
 
     def _get_close_behavior(self) -> str:
-        return self.config.get("ui", {}).get("close_behavior", "ask")
+        return self.config.get("ui", {}).get("close_behavior", "tray")
 
     def _set_close_behavior(self, behavior: str) -> None:
         self.config.setdefault("ui", {})["close_behavior"] = behavior
@@ -2485,27 +2587,6 @@ class CampusLoginWindow(QMainWindow):
         except OSError as exc:
             append_runtime_log(f"Failed to save tray notice state: {exc}")
 
-    def _prompt_close_behavior(self) -> str | None:
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Question)
-        dialog.setWindowTitle("关闭应用")
-        dialog.setText("第一次关闭窗口时，需要确定默认行为。")
-        dialog.setInformativeText(
-            "选择“最小化到托盘”后，应用会继续在后台运行；"
-            "选择“直接退出”后，应用会完全关闭。此次选择会保存为默认设置。"
-        )
-        tray_button = dialog.addButton("最小化到托盘", QMessageBox.AcceptRole)
-        exit_button = dialog.addButton("直接退出", QMessageBox.DestructiveRole)
-        dialog.addButton(QMessageBox.Cancel)
-        dialog.exec()
-
-        clicked = dialog.clickedButton()
-        if clicked is tray_button:
-            return "tray"
-        if clicked is exit_button:
-            return "exit"
-        return None
-
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._allow_close or not self.tray_icon:
             event.accept()
@@ -2522,20 +2603,8 @@ class CampusLoginWindow(QMainWindow):
             self._request_app_exit()
             return
 
-        choice = self._prompt_close_behavior()
-        if choice == "tray":
-            self._set_close_behavior("tray")
-            event.ignore()
-            self._minimize_to_tray()
-            return
-
-        if choice == "exit":
-            self._set_close_behavior("exit")
-            event.ignore()
-            self._request_app_exit()
-            return
-
         event.ignore()
+        self._minimize_to_tray()
 
 
 def main() -> int:

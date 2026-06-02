@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import http.cookiejar
 import json
 import os
@@ -33,6 +34,7 @@ USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = USER_DATA_DIR / "config.json"
 LOG_DIR = USER_DATA_DIR
 LOG_PATH = USER_DATA_DIR / "campus-login.log"
+_LOG_WRITER = contextvars.ContextVar("campus_login_log_writer", default=None)
 
 SUCCESS_MARKERS = (
     "dr.comwebloginid_3.htm",
@@ -66,7 +68,6 @@ DEFAULT_CONFIG = {
         "skip_tls_verify": False,
     },
     "portal": {
-        "target_ssid": "CUMT_Stu",
         "target_ssids": ["CUMT_Stu", "CUMT_Tec"],
         "landing_url": "http://10.2.5.251/",
         "login_base_url": "http://10.2.5.251:801/eportal/",
@@ -80,14 +81,10 @@ DEFAULT_CONFIG = {
         "password": "",
         "account_suffix": "@telecom",
         "login_method": 1,
-        "extra_params": {},
-        "account_prefix": "",
     },
     "ui": {
         "close_behavior": "tray",
-        "check_on_startup": True,
         "status_monitor_enabled": False,
-        "open_log_on_error": False,
         "startup_enabled": False,
         "startup_mode": "show",
         "status_refresh_interval_seconds": 30,
@@ -116,6 +113,11 @@ def load_config() -> dict:
 
 
 def write_log(message: str) -> None:
+    custom_writer = _LOG_WRITER.get()
+    if custom_writer is not None:
+        custom_writer(message)
+        return
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
@@ -125,6 +127,14 @@ def write_log(message: str) -> None:
     except PermissionError:
         pass
     print(line)
+
+
+def set_thread_log_writer(writer):
+    return _LOG_WRITER.set(writer)
+
+
+def reset_thread_log_writer(token) -> None:
+    _LOG_WRITER.reset(token)
 
 
 def build_opener(skip_tls_verify: bool) -> urllib.request.OpenerDirector:
@@ -278,9 +288,8 @@ def classify_login_response(payload: dict) -> dict:
 
 def build_user_account(login_cfg: dict) -> str:
     username = login_cfg["username"].strip()
-    prefix = login_cfg.get("account_prefix", "").strip()
     suffix = login_cfg.get("account_suffix", "").strip()
-    return f"{prefix}{username}{suffix}"
+    return f"{username}{suffix}"
 
 
 def first_value(query: dict, *keys: str) -> str:
@@ -310,10 +319,7 @@ def normalize_target_ssids(value: str | list[str] | tuple[str, ...] | set[str] |
 
 
 def get_portal_target_ssids(portal_cfg: dict) -> list[str]:
-    target_ssids = normalize_target_ssids(portal_cfg.get("target_ssids"))
-    if target_ssids:
-        return target_ssids
-    return normalize_target_ssids(portal_cfg.get("target_ssid", ""))
+    return normalize_target_ssids(portal_cfg.get("target_ssids"))
 
 
 def ssid_matches_targets(current_ssid: str, target_ssids: list[str]) -> bool:
@@ -812,9 +818,6 @@ def build_login_url(config: dict, context: dict) -> str:
         "jsVersion": portal_cfg.get("js_version", "3.0"),
         "_": timestamp,
     }
-
-    for key, value in login_cfg.get("extra_params", {}).items():
-        params[key] = value
 
     query = urllib.parse.urlencode(params)
     return f"{portal_cfg['login_base_url']}?{query}"
