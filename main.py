@@ -266,6 +266,15 @@ def classify_login_response(payload: dict) -> dict:
                 "rad;limit users err",
             ),
         ),
+        (
+            "operator_status_error",
+            "您绑定的运营商账号状态异常，请联系对应运营商处理。",
+            (
+                "rad:status_err",
+                "绑定的运营商账号状态异常",
+                "运营商账号状态异常",
+            ),
+        ),
     )
     for reason, user_message, patterns in failure_patterns:
         if any(pattern in normalized for pattern in patterns):

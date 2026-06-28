@@ -1264,6 +1264,7 @@ class CampusLoginWindow(QMainWindow):
             "account_not_found": "账号不存在，请确认账号或运营商选择是否正确。",
             "invalid_credentials": "统一身份认证用户名密码错误！",
             "device_limit": "登录设备超限，请先下线其他设备。",
+            "operator_status_error": "您绑定的运营商账号状态异常，请联系对应运营商处理。",
             "portal_rejected": "登录失败，门户返回信息无法识别。",
             "not_confirmed": "登录失败，未能确认联网成功。",
             "probe_error": "登录失败，无法访问校园网门户。",
@@ -1280,6 +1281,7 @@ class CampusLoginWindow(QMainWindow):
             "account_not_found",
             "invalid_credentials",
             "device_limit",
+            "operator_status_error",
         }
         if reason not in stop_reasons:
             return False
