@@ -112,6 +112,7 @@ from widgets import (
     ClickableFrame,
     ClickableStatusBadge,
     FlatComboBox,
+    GlassBackdrop,
     PasswordLineEdit,
     ResizeGrip,
     TitleBar,
@@ -249,6 +250,7 @@ class CampusLoginWindow(QMainWindow):
     def __init__(self, start_hidden: bool = False, from_startup: bool = False) -> None:
         super().__init__()
         self.setWindowTitle(APP_DISPLAY_NAME)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.resize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -286,7 +288,6 @@ class CampusLoginWindow(QMainWindow):
         self._initial_position_applied = False
         self._startup_tasks_started = False
         self._resize_grip_width = 10
-        self._geometry_correction_in_progress = False
         self._settings_panel_width = SETTINGS_PANEL_WIDTH
         self._settings_panel_visible = False
         self._loading_ui_settings = False
@@ -325,9 +326,12 @@ class CampusLoginWindow(QMainWindow):
         if sys.platform == "win32":
             self.setAttribute(Qt.WA_NativeWindow, True)
             self.winId()
+            self._apply_window_acrylic()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if sys.platform == "win32":
+            self._apply_window_acrylic()
         self._refresh_window_constraints()
         if not self._initial_position_applied:
             self._initial_position_applied = True
@@ -350,12 +354,9 @@ class CampusLoginWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_resize_grips()
-        self._refresh_window_constraints()
-        self._constrain_window_geometry()
 
     def moveEvent(self, event: QMoveEvent) -> None:
         super().moveEvent(event)
-        self._refresh_window_constraints()
 
     def nativeEvent(self, eventType, message):
         if sys.platform == "win32":
@@ -426,45 +427,6 @@ class CampusLoginWindow(QMainWindow):
         max_height = title_height + main_height
         return max(self.minimumHeight(), max_height)
 
-    def _constrain_window_geometry(self) -> None:
-        if self._geometry_correction_in_progress or self.isMaximized():
-            return
-
-        virtual = self._virtual_available_geometry()
-        if virtual.isNull():
-            return
-
-        geometry = self.geometry()
-        fixed_width = self.minimumWidth()
-        max_height = min(
-            max(self.minimumHeight(), self._main_page_max_height()),
-            max(self.minimumHeight(), virtual.height()),
-        )
-
-        width = fixed_width
-        height = min(max(geometry.height(), self.minimumHeight()), max_height)
-        x = geometry.x()
-        y = geometry.y()
-
-        if x < virtual.left():
-            x = virtual.left()
-        if y < virtual.top():
-            y = virtual.top()
-        if x + width > virtual.right() + 1:
-            x = virtual.right() - width + 1
-        if y + height > virtual.bottom() + 1:
-            y = virtual.bottom() - height + 1
-
-        corrected = QRect(x, y, width, height)
-        if corrected == geometry:
-            return
-
-        self._geometry_correction_in_progress = True
-        try:
-            self.setGeometry(corrected)
-        finally:
-            self._geometry_correction_in_progress = False
-
     def _finish_startup(self) -> None:
         append_runtime_log("Startup tasks begin")
         self._create_tray()
@@ -522,7 +484,7 @@ class CampusLoginWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.window_surface = QFrame()
+        self.window_surface = GlassBackdrop()
         self.window_surface.setObjectName("windowSurface")
         outer.addWidget(self.window_surface)
 
@@ -711,30 +673,33 @@ class CampusLoginWindow(QMainWindow):
         tools_title.setFont(self._make_section_title_font())
         tools_layout.addWidget(tools_title)
 
-        tools_buttons = QHBoxLayout()
-        tools_buttons.setSpacing(6)
+        tools_segment = QFrame()
+        tools_segment.setObjectName("toolsSegment")
+        tools_buttons = QHBoxLayout(tools_segment)
+        tools_buttons.setContentsMargins(3, 3, 3, 3)
+        tools_buttons.setSpacing(2)
 
         self.detect_button = QPushButton("连通性测试")
-        self.detect_button.setObjectName("ghost")
+        self.detect_button.setObjectName("toolSegmentButton")
         self.detect_button.setFont(self._make_button_font(16))
         self.detect_button.setCheckable(True)
         self.detect_button.clicked.connect(lambda: self._show_tools_page("latency"))
-        tools_buttons.addWidget(self.detect_button)
+        tools_buttons.addWidget(self.detect_button, 1)
 
         self.details_toggle = QPushButton("显示网络详情")
-        self.details_toggle.setObjectName("ghost")
+        self.details_toggle.setObjectName("toolSegmentButton")
         self.details_toggle.setFont(self._make_button_font(16))
         self.details_toggle.setCheckable(True)
         self.details_toggle.clicked.connect(lambda: self._show_tools_page("details"))
-        tools_buttons.addWidget(self.details_toggle)
+        tools_buttons.addWidget(self.details_toggle, 1)
 
         self.log_toggle = QPushButton("显示运行日志")
-        self.log_toggle.setObjectName("ghost")
+        self.log_toggle.setObjectName("toolSegmentButton")
         self.log_toggle.setFont(self._make_button_font(16))
         self.log_toggle.setCheckable(True)
         self.log_toggle.clicked.connect(lambda: self._show_tools_page("log"))
-        tools_buttons.addWidget(self.log_toggle)
-        tools_layout.addLayout(tools_buttons)
+        tools_buttons.addWidget(self.log_toggle, 1)
+        tools_layout.addWidget(tools_segment)
 
         self.tools_stack = QStackedWidget()
         self.tools_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1265,6 +1230,7 @@ class CampusLoginWindow(QMainWindow):
             "invalid_credentials": "统一身份认证用户名密码错误！",
             "device_limit": "登录设备超限，请先下线其他设备。",
             "operator_status_error": "您绑定的运营商账号状态异常，请联系对应运营商处理。",
+            "operator_password_error": "绑定的运营商密码错误，请联系运营商核实或去运营商校园业务厅进行绑定。",
             "portal_rejected": "登录失败，门户返回信息无法识别。",
             "not_confirmed": "登录失败，未能确认联网成功。",
             "probe_error": "登录失败，无法访问校园网门户。",
@@ -1282,6 +1248,7 @@ class CampusLoginWindow(QMainWindow):
             "invalid_credentials",
             "device_limit",
             "operator_status_error",
+            "operator_password_error",
         }
         if reason not in stop_reasons:
             return False
@@ -2073,6 +2040,52 @@ class CampusLoginWindow(QMainWindow):
             )
         except Exception:
             pass
+
+    def _apply_window_acrylic(self) -> None:
+        if sys.platform != "win32":
+            return
+
+        class AccentPolicy(ctypes.Structure):
+            _fields_ = [
+                ("accent_state", ctypes.c_int),
+                ("accent_flags", ctypes.c_int),
+                ("gradient_color", ctypes.c_uint),
+                ("animation_id", ctypes.c_int),
+            ]
+
+        class WindowCompositionAttributeData(ctypes.Structure):
+            _fields_ = [
+                ("attribute", ctypes.c_int),
+                ("data", ctypes.c_void_p),
+                ("size", ctypes.c_size_t),
+            ]
+
+        try:
+            set_window_composition_attribute = (
+                ctypes.windll.user32.SetWindowCompositionAttribute
+            )
+            set_window_composition_attribute.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(WindowCompositionAttributeData),
+            ]
+            set_window_composition_attribute.restype = ctypes.c_int
+
+            accent = AccentPolicy()
+            accent.accent_state = 4  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+            accent.accent_flags = 2
+            accent.gradient_color = 0x12F8F1EA  # AABBGGRR
+
+            data = WindowCompositionAttributeData()
+            data.attribute = 19  # WCA_ACCENT_POLICY
+            data.data = ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p)
+            data.size = ctypes.sizeof(accent)
+            set_window_composition_attribute(
+                ctypes.c_void_p(int(self.winId())),
+                ctypes.byref(data),
+            )
+
+        except Exception as exc:
+            append_runtime_log(f"Could not enable Windows acrylic backdrop: {exc}")
 
     def _validate_login_form(self) -> bool:
         username = self.username_edit.text().strip()

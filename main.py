@@ -275,6 +275,14 @@ def classify_login_response(payload: dict) -> dict:
                 "运营商账号状态异常",
             ),
         ),
+        (
+            "operator_password_error",
+            "绑定的运营商密码错误，请联系运营商核实或去运营商校园业务厅进行绑定。",
+            (
+                "rad:passwd_err",
+                "绑定的运营商密码错误",
+            ),
+        ),
     )
     for reason, user_message, patterns in failure_patterns:
         if any(pattern in normalized for pattern in patterns):

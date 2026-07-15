@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -16,6 +26,76 @@ from PySide6.QtWidgets import (
 
 from constants import INPUT_HEIGHT, TRAILING_ICON_AREA_WIDTH, TRAILING_ICON_SIZE, UI_RADIUS
 from paths import ICON_DIR
+
+
+class GlassBackdrop(QFrame):
+    """Paint one continuous translucent backdrop behind the whole window."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._backdrop = QPixmap()
+        self._backdrop_key: tuple[int, int] | None = None
+
+    def resizeEvent(self, event) -> None:
+        self._backdrop_key = None
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        self._ensure_backdrop()
+        if not self._backdrop.isNull():
+            painter = QPainter(self)
+            painter.drawPixmap(0, 0, self._backdrop)
+
+    def _ensure_backdrop(self) -> None:
+        width = self.width()
+        height = self.height()
+        key = (width, height)
+        if width <= 0 or height <= 0 or key == self._backdrop_key:
+            return
+
+        # The backdrop contains only soft gradients. Keeping it in logical pixels
+        # prevents costly cache rebuilds while a window crosses mixed-DPI screens.
+        backdrop = QPixmap(width, height)
+        backdrop.fill(Qt.transparent)
+
+        painter = QPainter(backdrop)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        base = QLinearGradient(0, 0, width, height)
+        base.setColorAt(0.0, QColor(219, 230, 245, 64))
+        base.setColorAt(0.42, QColor(242, 246, 251, 54))
+        base.setColorAt(1.0, QColor(223, 232, 243, 62))
+        painter.fillRect(QRectF(0, 0, width, height), base)
+
+        brand_glow = QRadialGradient(
+            QPointF(width * 0.08, height * 0.02),
+            max(width, height) * 0.72,
+        )
+        brand_glow.setColorAt(0.0, QColor(18, 46, 138, 30))
+        brand_glow.setColorAt(0.48, QColor(70, 111, 190, 12))
+        brand_glow.setColorAt(1.0, QColor(70, 111, 190, 0))
+        painter.fillRect(QRectF(0, 0, width, height), brand_glow)
+
+        ice_glow = QRadialGradient(
+            QPointF(width * 1.02, height * 0.34),
+            max(width, height) * 0.58,
+        )
+        ice_glow.setColorAt(0.0, QColor(87, 194, 196, 20))
+        ice_glow.setColorAt(0.55, QColor(125, 205, 209, 8))
+        ice_glow.setColorAt(1.0, QColor(125, 205, 209, 0))
+        painter.fillRect(QRectF(0, 0, width, height), ice_glow)
+
+        top_light = QLinearGradient(0, 0, 0, min(210, height))
+        top_light.setColorAt(0.0, QColor(255, 255, 255, 26))
+        top_light.setColorAt(0.46, QColor(255, 255, 255, 9))
+        top_light.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(QRectF(0, 0, width, min(210, height)), top_light)
+
+        painter.end()
+        self._backdrop = backdrop
+        self._backdrop_key = key
+
 
 class TitleBar(QFrame):
     def __init__(self, window: "CampusLoginWindow") -> None:
@@ -255,4 +335,3 @@ class ClickableFrame(QFrame):
             event.accept()
             return
         super().mousePressEvent(event)
-

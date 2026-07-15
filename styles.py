@@ -13,13 +13,13 @@ QWidget {
     font-weight: __TYPO_APP_WEIGHT__;
 }
 QMainWindow, QWidget#root {
-    background: #f3f6fb;
+    background: transparent;
 }
 QLabel {
     background: transparent;
 }
 QFrame#windowSurface {
-    background: #f3f6fb;
+    background: transparent;
     border: none;
     border-radius: 0px;
 }
@@ -52,7 +52,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: transparent;
 }
 QFrame#titleBar {
-    background: #f3f6fb;
+    background: transparent;
     border: none;
     border-top-left-radius: __RADIUS__px;
     border-top-right-radius: __RADIUS__px;
@@ -127,13 +127,13 @@ QPushButton#titleCloseButton:hover {
     color: #ffffff;
 }
 QFrame#card {
-    background: #ffffff;
-    border: 1px solid #d9e3f0;
+    background: rgba(255, 255, 255, 220);
+    border: 1px solid rgba(196, 211, 231, 190);
     border-radius: __RADIUS__px;
 }
 QFrame#settingsPanel {
-    background: #ffffff;
-    border: 1px solid #d9e3f0;
+    background: rgba(255, 255, 255, 220);
+    border: 1px solid rgba(196, 211, 231, 190);
     border-radius: __RADIUS__px;
 }
 QLabel#subtitle {
@@ -275,6 +275,28 @@ QPushButton#ghost:checked {
     color: #12315d;
     border: 1px solid #b9cdf0;
 }
+QFrame#toolsSegment {
+    background: rgba(224, 233, 246, 155);
+    border: 1px solid rgba(190, 206, 228, 165);
+    border-radius: __RADIUS__px;
+}
+QPushButton#toolSegmentButton {
+    min-height: 38px;
+    background: transparent;
+    color: #52637b;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 0 10px;
+}
+QPushButton#toolSegmentButton:hover {
+    background: rgba(255, 255, 255, 112);
+    color: #243b5e;
+}
+QPushButton#toolSegmentButton:checked {
+    background: rgba(255, 255, 255, 220);
+    color: #122e8a;
+    border: 1px solid rgba(164, 186, 220, 185);
+}
 QPushButton#statusActionButton {
     min-width: 38px;
     max-width: 38px;
@@ -404,4 +426,3 @@ def pick_font_family(loaded_families: set[str], *preferred: str, fallback: str) 
         if family in loaded_families:
             return family
     return fallback
-
